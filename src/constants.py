@@ -4,6 +4,17 @@ Modify these values to adjust game feel and balance.
 """
 
 import pygame
+from enum import Enum, auto
+
+
+# =============================================================================
+# PASS TYPES
+# =============================================================================
+class PassType(Enum):
+    """Types of passes available in the game."""
+    SHORT = auto()      # S + direction - direct ground pass
+    THROUGH = auto()    # W key - leading pass to open space
+    LOBBED = auto()     # A key - aerial pass over defenders
 
 # =============================================================================
 # DISPLAY
@@ -64,8 +75,31 @@ SHOT_CHARGE_RATE = 1.8          # power per second (0-1 scale)
 SHOT_CHARGE_MAX = 1.0           # max charge level
 SHOT_INACCURACY = 0.15          # shot direction randomness (radians)
 
-PASS_SPEED = 320.0              # base pass speed
+PASS_SPEED = 320.0              # base pass speed (legacy, kept for AI)
 PASS_LEAD_FACTOR = 0.2          # lead pass toward teammate's velocity
+
+# Short Pass (S + direction)
+SHORT_PASS_SPEED = 340.0        # direct ground pass speed
+SHORT_PASS_LEAD_FACTOR = 0.15   # slight lead for direct pass
+
+# Through Ball (W key)
+THROUGH_BALL_SPEED = 400.0      # faster, longer range
+THROUGH_BALL_LEAD_FACTOR = 0.6  # significant lead - ball goes to space ahead
+
+# Lobbed Pass (A key)
+LOBBED_PASS_SPEED = 280.0       # slower horizontal speed
+LOBBED_PASS_LEAD_FACTOR = 0.25  # moderate lead
+LOBBED_PASS_INITIAL_HEIGHT_VEL = 200.0  # upward velocity for arc
+LOBBED_PASS_GRAVITY = 350.0     # gravity pulling ball down
+
+# =============================================================================
+# AERIAL BALL PHYSICS
+# =============================================================================
+AERIAL_INTERCEPTION_HEIGHT = 25.0  # ball must be below this to be intercepted
+BALL_MAX_HEIGHT = 80.0             # visual max height for scaling
+BALL_SHADOW_OFFSET_FACTOR = 0.3    # shadow offset increases with height
+BALL_SIZE_SCALE_FACTOR = 0.5       # ball size increases with height (max 1.5x)
+BALL_AERIAL_FRICTION_MULT = 0.3    # reduced friction when aerial
 
 # =============================================================================
 # TACKLING
@@ -171,8 +205,10 @@ KEY_MOVE_UP = pygame.K_UP
 KEY_MOVE_DOWN = pygame.K_DOWN
 KEY_MOVE_LEFT = pygame.K_LEFT
 KEY_MOVE_RIGHT = pygame.K_RIGHT
-KEY_SHOOT = pygame.K_SPACE
-KEY_PASS = pygame.K_s
+KEY_SHOOT = pygame.K_d
+KEY_PASS = pygame.K_s             # Short pass (+ direction for directional pass)
+KEY_THROUGH_BALL = pygame.K_w     # Through ball pass
+KEY_LOBBED_PASS = pygame.K_a      # Lobbed/aerial pass
 KEY_SWITCH_PLAYER = pygame.K_TAB
 KEY_RESET = pygame.K_r
 KEY_CELEBRATE = pygame.K_k

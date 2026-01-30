@@ -201,34 +201,80 @@ class Renderer:
             )
 
     def _draw_ball_shadow(self, ball: Ball) -> None:
-        """Draw shadow under ball."""
-        shadow_offset = pygame.Vector2(3, 4)
+        """Draw shadow under ball (offset increases with height for aerial balls)."""
+        shadow_offset = ball.get_shadow_offset()
         shadow_pos = ball.position + shadow_offset
 
+        # Shadow gets larger and more transparent as ball gets higher
+        if ball.is_aerial:
+            from .constants import BALL_MAX_HEIGHT
+            shadow_scale = 1.0 + (ball.height / BALL_MAX_HEIGHT) * 0.5
+            shadow_alpha = max(30, 60 - int(ball.height * 0.5))
+        else:
+            shadow_scale = 1.0
+            shadow_alpha = 60
+
+        shadow_width = int(BALL_RADIUS * 3 * shadow_scale)
+        shadow_height = int(BALL_RADIUS * 2 * shadow_scale)
+
         # Draw ellipse shadow
-        shadow_surface = pygame.Surface((BALL_RADIUS * 3, BALL_RADIUS * 2), pygame.SRCALPHA)
+        shadow_surface = pygame.Surface((shadow_width, shadow_height), pygame.SRCALPHA)
         pygame.draw.ellipse(
             shadow_surface,
-            (0, 0, 0, 60),
-            (0, 0, BALL_RADIUS * 3, BALL_RADIUS * 2)
+            (0, 0, 0, shadow_alpha),
+            (0, 0, shadow_width, shadow_height)
         )
         self.screen.blit(
             shadow_surface,
-            (shadow_pos.x - BALL_RADIUS * 1.5, shadow_pos.y - BALL_RADIUS)
+            (shadow_pos.x - shadow_width / 2, shadow_pos.y - shadow_height / 2)
         )
 
     def _draw_ball(self, ball: Ball) -> None:
-        """Draw the football."""
-        pos = (int(ball.position.x), int(ball.position.y))
+        """Draw the football with size variation for aerial state."""
+        # Calculate visual position (ball appears higher when aerial)
+        visual_y = ball.position.y
+        if ball.is_aerial:
+            # Ball drawn higher on screen when in air
+            visual_y = ball.position.y - ball.height
+
+        pos = (int(ball.position.x), int(visual_y))
+
+        # Scale ball size based on height (appears larger when higher/closer)
+        scale = ball.get_visual_scale()
+        radius = int(BALL_RADIUS * scale)
 
         # White ball
-        pygame.draw.circle(self.screen, COLOR_BALL, pos, BALL_RADIUS)
+        pygame.draw.circle(self.screen, COLOR_BALL, pos, radius)
 
         # Black outline
-        pygame.draw.circle(self.screen, COLOR_BALL_PATTERN, pos, BALL_RADIUS, 2)
+        pygame.draw.circle(self.screen, COLOR_BALL_PATTERN, pos, radius, 2)
 
         # Simple pattern (inner circle)
-        pygame.draw.circle(self.screen, COLOR_BALL_PATTERN, pos, BALL_RADIUS // 2, 1)
+        pygame.draw.circle(self.screen, COLOR_BALL_PATTERN, pos, max(1, radius // 2), 1)
+
+        # Draw height indicator when aerial (dotted line to ground position)
+        if ball.is_aerial and ball.height > 10:
+            ground_pos = (int(ball.position.x), int(ball.position.y))
+            self._draw_dotted_line(pos, ground_pos, (100, 100, 100))
+
+    def _draw_dotted_line(self, start: Tuple[int, int], end: Tuple[int, int],
+                           color: Tuple[int, int, int]) -> None:
+        """Draw a dotted line between two points."""
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        dist = math.sqrt(dx * dx + dy * dy)
+
+        if dist == 0:
+            return
+
+        dot_spacing = 6
+        num_dots = int(dist / dot_spacing)
+
+        for i in range(num_dots):
+            t = i / max(num_dots - 1, 1)
+            x = int(start[0] + dx * t)
+            y = int(start[1] + dy * t)
+            pygame.draw.circle(self.screen, color, (x, y), 1)
 
     def _draw_teams(self, teams: List[Team]) -> None:
         """Draw all players from both teams."""
@@ -391,7 +437,7 @@ class Renderer:
         self.screen.blit(timer_surface, timer_rect)
 
         # Controls hint (bottom of screen)
-        controls_text = "Arrow: Move | Space: Shoot | S: Pass | Tab: Switch | R: Reset | K: Celebrate | Esc: Quit"
+        controls_text = "Arrows: Move | D: Shoot | S+Dir: Pass | W: Through | A: Lob | Tab: Switch | R: Reset"
         controls_surface = self.font_tiny.render(controls_text, True, (150, 150, 150))
         controls_rect = controls_surface.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 12))
         self.screen.blit(controls_surface, controls_rect)

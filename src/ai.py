@@ -20,7 +20,7 @@ from .constants import (
     AI_DRIBBLE_SPEED, AI_THROUGH_BALL_CHANCE, AI_ONE_TWO_CHANCE,
     PLAYER_MAX_SPEED, POSSESSION_DISTANCE, TACKLE_RANGE,
     SHOT_POWER_MIN, SHOT_POWER_MAX, PASS_SPEED, RANDOM_SEED,
-    PITCH_WIDTH, PITCH_HEIGHT
+    PITCH_WIDTH, PITCH_HEIGHT, PassType
 )
 
 
@@ -242,12 +242,69 @@ class AIController:
         player.ai_action = None
 
     def _execute_pass(self, player: Player, teammate: Player) -> None:
-        """Execute a pass to teammate."""
+        """Execute a pass to teammate - choose appropriate pass type."""
         if not player.has_ball:
             return
 
-        player.pass_ball(self.ball, teammate)
+        # Determine best pass type based on situation
+        pass_type = self._choose_pass_type(player, teammate)
+
+        player.pass_ball(self.ball, teammate, pass_type)
         player.ai_action = None
+
+    def _choose_pass_type(self, player: Player, teammate: Player) -> PassType:
+        """AI logic to choose the best pass type based on situation."""
+        distance = (teammate.position - player.position).length()
+
+        # Count defenders in the passing lane
+        defenders_in_path = self._count_defenders_in_passing_lane(player, teammate)
+
+        # Lobbed pass if defenders are blocking and distance is suitable
+        if defenders_in_path >= 1 and 120 < distance < 400:
+            if self.rng.random() < 0.6:  # 60% chance to lob over
+                return PassType.LOBBED
+
+        # Through ball if teammate is making a run and has space
+        if self._is_making_forward_run(teammate):
+            if self.rng.random() < AI_THROUGH_BALL_CHANCE:
+                return PassType.THROUGH
+
+        # Default to short pass
+        return PassType.SHORT
+
+    def _is_making_forward_run(self, player: Player) -> bool:
+        """Check if player is moving toward goal."""
+        if player.velocity.length() < 50:
+            return False
+
+        goal_center = self._get_opponent_goal_center()
+        goal_dir = goal_center - player.position
+        if goal_dir.length() == 0:
+            return False
+
+        vel_toward_goal = player.velocity.dot(goal_dir.normalize())
+        return vel_toward_goal > 80
+
+    def _count_defenders_in_passing_lane(self, passer: Player, receiver: Player) -> int:
+        """Count defenders in the passing lane."""
+        count = 0
+        direction = receiver.position - passer.position
+        dist = direction.length()
+
+        if dist == 0:
+            return 0
+
+        for opponent in self.opponent_team.players:
+            to_opp = opponent.position - passer.position
+            t = to_opp.dot(direction) / direction.dot(direction)
+
+            if 0.15 < t < 0.85:
+                closest = passer.position + direction * t
+                perp_dist = (opponent.position - closest).length()
+                if perp_dist < 45:
+                    count += 1
+
+        return count
 
     # =========================================================================
     # Helper methods for decision making

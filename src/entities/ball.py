@@ -1,5 +1,6 @@
 """
 Ball entity with physics, bouncing, and ownership mechanics.
+Supports aerial passes with height simulation.
 """
 
 from typing import TYPE_CHECKING, Optional, List
@@ -7,7 +8,10 @@ import pygame
 
 from ..constants import (
     BALL_RADIUS, BALL_MAX_SPEED, BALL_FRICTION, BALL_BOUNCE_DAMPING,
-    BALL_MIN_SPEED, POSSESSION_DISTANCE, POSSESSION_SPEED, POSSESSION_OFFSET
+    BALL_MIN_SPEED, POSSESSION_DISTANCE, POSSESSION_SPEED, POSSESSION_OFFSET,
+    AERIAL_INTERCEPTION_HEIGHT, BALL_MAX_HEIGHT, BALL_SHADOW_OFFSET_FACTOR,
+    BALL_SIZE_SCALE_FACTOR, BALL_AERIAL_FRICTION_MULT, LOBBED_PASS_GRAVITY,
+    PassType
 )
 
 if TYPE_CHECKING:
@@ -32,6 +36,12 @@ class Ball:
         self.last_owner: Optional['Player'] = None
         self.last_touch_team: Optional[str] = None  # 'home' or 'away'
 
+        # Aerial state (for lobbed passes)
+        self.height: float = 0.0              # Current height (0 = ground)
+        self.vertical_velocity: float = 0.0   # Vertical velocity for arc
+        self.is_aerial: bool = False          # True while ball is in air
+        self.pass_type: Optional[PassType] = None  # Type of current pass
+
     def update(self, dt: float) -> None:
         """Update ball physics."""
         if self.owner:
@@ -39,12 +49,17 @@ class Ball:
             self._follow_owner()
             return
 
-        # Apply velocity
+        # Handle aerial physics if ball is in the air
+        if self.is_aerial:
+            self._update_aerial(dt)
+
+        # Apply velocity (horizontal movement)
         self.position += self.velocity * dt
 
-        # Apply friction
+        # Apply friction (reduced when aerial)
         if self.velocity.length() > 0:
-            friction_force = self.friction * dt
+            friction_mult = BALL_AERIAL_FRICTION_MULT if self.is_aerial else 1.0
+            friction_force = self.friction * friction_mult * dt
             current_speed = self.velocity.length()
 
             if current_speed <= friction_force:
@@ -52,13 +67,30 @@ class Ball:
             else:
                 self.velocity -= self.velocity.normalize() * friction_force
 
-        # Stop if very slow
-        if self.velocity.length() < BALL_MIN_SPEED:
+        # Stop if very slow (only when on ground)
+        if not self.is_aerial and self.velocity.length() < BALL_MIN_SPEED:
             self.velocity = pygame.Vector2(0, 0)
 
         # Cap speed
         if self.velocity.length() > self.max_speed:
             self.velocity = self.velocity.normalize() * self.max_speed
+
+    def _update_aerial(self, dt: float) -> None:
+        """Update aerial ball physics (height, gravity, landing)."""
+        # Apply gravity to vertical velocity
+        self.vertical_velocity -= LOBBED_PASS_GRAVITY * dt
+
+        # Update height
+        self.height += self.vertical_velocity * dt
+
+        # Check for landing
+        if self.height <= 0:
+            self.height = 0.0
+            self.vertical_velocity = 0.0
+            self.is_aerial = False
+            self.pass_type = None
+            # Apply landing friction (ball slows when landing)
+            self.velocity *= 0.7
 
     def _follow_owner(self) -> None:
         """Position ball in front of owning player."""
@@ -68,17 +100,63 @@ class Ball:
             self.velocity = pygame.Vector2(0, 0)
 
     def kick(self, direction: pygame.Vector2, power: float) -> None:
-        """Apply kick impulse in given direction."""
+        """Apply kick impulse in given direction (ground pass)."""
         if direction.length() > 0:
             direction = direction.normalize()
         else:
             direction = pygame.Vector2(1, 0)
 
         self.velocity = direction * power
+        self.is_aerial = False
+        self.height = 0.0
+        self.vertical_velocity = 0.0
 
         # Cap speed
         if self.velocity.length() > self.max_speed:
             self.velocity = self.velocity.normalize() * self.max_speed
+
+    def kick_lobbed(self, direction: pygame.Vector2, power: float,
+                    initial_height_vel: float) -> None:
+        """Kick ball into the air (lobbed pass)."""
+        if direction.length() > 0:
+            direction = direction.normalize()
+        else:
+            direction = pygame.Vector2(1, 0)
+
+        self.velocity = direction * power
+        self.vertical_velocity = initial_height_vel
+        self.height = 1.0  # Start slightly off ground
+        self.is_aerial = True
+        self.pass_type = PassType.LOBBED
+
+        # Cap horizontal speed
+        if self.velocity.length() > self.max_speed:
+            self.velocity = self.velocity.normalize() * self.max_speed
+
+    def can_be_intercepted(self) -> bool:
+        """Return True if ball can be intercepted/possessed.
+        Aerial balls above threshold cannot be intercepted."""
+        if self.is_aerial and self.height > AERIAL_INTERCEPTION_HEIGHT:
+            return False
+        return True
+
+    def get_visual_scale(self) -> float:
+        """Return scale factor for ball rendering based on height.
+        Ball appears larger when higher (perspective effect)."""
+        if not self.is_aerial:
+            return 1.0
+        # Scale from 1.0 to 1.5 based on height
+        scale = 1.0 + (self.height / BALL_MAX_HEIGHT) * BALL_SIZE_SCALE_FACTOR
+        return min(scale, 1.5)
+
+    def get_shadow_offset(self) -> pygame.Vector2:
+        """Return shadow offset based on height.
+        Shadow moves further from ball as height increases."""
+        base_offset = pygame.Vector2(3, 4)
+        if self.is_aerial:
+            height_factor = self.height * BALL_SHADOW_OFFSET_FACTOR
+            return base_offset + pygame.Vector2(height_factor * 0.5, height_factor)
+        return base_offset
 
     def bounce(self, normal: pygame.Vector2) -> None:
         """Reflect velocity off surface with normal vector."""
@@ -97,6 +175,10 @@ class Ball:
 
     def check_ownership(self, players: List['Player']) -> None:
         """Determine ball ownership based on proximity and speed."""
+        # Cannot possess aerial ball above threshold
+        if not self.can_be_intercepted():
+            return
+
         # If ball is moving fast, can't be possessed
         if self.velocity.length() > POSSESSION_SPEED:
             return
@@ -154,6 +236,10 @@ class Ball:
         """Reset ball to given position."""
         self.position = pygame.Vector2(position)
         self.velocity = pygame.Vector2(0, 0)
+        self.height = 0.0
+        self.vertical_velocity = 0.0
+        self.is_aerial = False
+        self.pass_type = None
         self.release()
 
     def get_speed(self) -> float:

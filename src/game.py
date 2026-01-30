@@ -20,7 +20,8 @@ from .constants import (
     COLOR_TEAM_HOME, COLOR_TEAM_HOME_SECONDARY,
     COLOR_TEAM_AWAY, COLOR_TEAM_AWAY_SECONDARY,
     KEY_MOVE_UP, KEY_MOVE_DOWN, KEY_MOVE_LEFT, KEY_MOVE_RIGHT,
-    KEY_SHOOT, KEY_PASS, KEY_SWITCH_PLAYER, KEY_RESET, KEY_CELEBRATE, KEY_QUIT
+    KEY_SHOOT, KEY_PASS, KEY_SWITCH_PLAYER, KEY_RESET, KEY_CELEBRATE, KEY_QUIT,
+    KEY_THROUGH_BALL, KEY_LOBBED_PASS, PassType, PLAYER_MAX_SPEED
 )
 
 
@@ -95,6 +96,10 @@ class Game:
 
         # Last goal scorer
         self.last_scorer: Optional[Player] = None
+
+        # Pass input state (for S + direction combo)
+        self.s_key_held: bool = False
+        self.pass_direction_pressed: Optional[pygame.Vector2] = None
 
     def _create_teams(self) -> None:
         """Create both teams with players."""
@@ -188,8 +193,17 @@ class Game:
                 if player and player.has_ball:
                     player.start_charging_shot()
 
+            # Short Pass: S key (direction-aware on release)
             elif key == KEY_PASS:
-                self._execute_pass()
+                self.s_key_held = True
+
+            # Through Ball: W key
+            elif key == KEY_THROUGH_BALL:
+                self._execute_through_ball()
+
+            # Lobbed Pass: A key
+            elif key == KEY_LOBBED_PASS:
+                self._execute_lobbed_pass()
 
             elif key == KEY_CELEBRATE:
                 player = self.teams[0].selected_player
@@ -205,8 +219,15 @@ class Game:
                 goal_center = self.pitch.get_goal_center('right')
                 player.release_shot(self.ball, goal_center)
 
+        # S released - execute short pass (direction-aware)
+        elif key == KEY_PASS:
+            if self.s_key_held:
+                self._execute_short_pass()
+            self.s_key_held = False
+            self.pass_direction_pressed = None
+
     def _handle_player_input(self, dt: float) -> None:
-        """Handle continuous player input (movement)."""
+        """Handle continuous player input (movement and pass direction)."""
         if self.state != GameState.PLAYING:
             return
 
@@ -227,31 +248,224 @@ class Game:
             direction.x += 1
 
         if direction.length() > 0:
-            player.move(direction)
+            # Track direction for S + arrow pass
+            if self.s_key_held:
+                self.pass_direction_pressed = direction.normalize()
+                # Don't move player while S is held - just set direction
+            else:
+                player.move(direction)
+        else:
+            # Reset pass direction if no arrow is pressed
+            if not self.s_key_held:
+                self.pass_direction_pressed = None
 
     def _switch_player(self) -> None:
         """Switch to next best player."""
         home_team = self.teams[0]
         home_team.cycle_selection(self.ball.position)
 
-    def _execute_pass(self) -> None:
-        """Execute pass to nearest teammate and auto-switch to receiver."""
+    def _execute_short_pass(self) -> None:
+        """Execute short pass (S + direction or nearest teammate)."""
         player = self.teams[0].selected_player
         if not player or not player.has_ball:
             return
 
-        # Find best open teammate
-        teammate = self.teams[0].get_open_teammate(player, self.teams[1].players)
-        if not teammate:
-            # Just pass to closest if no one is open
-            teammates = self.teams[0].get_teammates(player)
-            if teammates:
-                teammate = min(teammates, key=lambda t: (t.position - player.position).length())
+        # Find teammate in pressed direction, or nearest
+        if self.pass_direction_pressed:
+            teammate = self._find_teammate_in_direction(player, self.pass_direction_pressed)
+        else:
+            teammate = self._find_nearest_teammate(player)
 
         if teammate:
-            player.pass_ball(self.ball, teammate)
-            # Auto-switch to the pass receiver
+            player.pass_ball(self.ball, teammate, PassType.SHORT)
             self.teams[0].select_player(teammate)
+
+    def _execute_through_ball(self) -> None:
+        """Execute through ball to teammate making a run."""
+        player = self.teams[0].selected_player
+        if not player or not player.has_ball:
+            return
+
+        # Find best teammate for through ball
+        teammate = self._find_through_ball_target(player)
+
+        if teammate:
+            player.pass_ball(self.ball, teammate, PassType.THROUGH)
+            self.teams[0].select_player(teammate)
+
+    def _execute_lobbed_pass(self) -> None:
+        """Execute lobbed pass to teammate (over defenders)."""
+        player = self.teams[0].selected_player
+        if not player or not player.has_ball:
+            return
+
+        # Find best teammate for lob (prefer distant teammates)
+        teammate = self._find_lobbed_pass_target(player)
+
+        if teammate:
+            player.pass_ball(self.ball, teammate, PassType.LOBBED)
+            self.teams[0].select_player(teammate)
+
+    def _find_teammate_in_direction(self, player: Player,
+                                     direction: pygame.Vector2) -> Optional[Player]:
+        """Find teammate closest to the specified direction (within 60 degrees)."""
+        best_teammate = None
+        best_score = -1.0
+
+        teammates = self.teams[0].get_teammates(player)
+
+        for teammate in teammates:
+            if teammate.role == PlayerRole.GOALKEEPER:
+                continue
+
+            to_teammate = teammate.position - player.position
+            if to_teammate.length() == 0:
+                continue
+
+            to_teammate = to_teammate.normalize()
+
+            # Dot product gives alignment (1.0 = perfect, 0 = perpendicular)
+            dot = direction.dot(to_teammate)
+
+            # Only consider teammates within ~60 degrees (dot > 0.5)
+            if dot > 0.5 and dot > best_score:
+                best_score = dot
+                best_teammate = teammate
+
+        # Fallback to nearest if no one in direction
+        if not best_teammate:
+            return self._find_nearest_teammate(player)
+
+        return best_teammate
+
+    def _find_nearest_teammate(self, player: Player) -> Optional[Player]:
+        """Find nearest non-GK teammate."""
+        teammates = [t for t in self.teams[0].get_teammates(player)
+                     if t.role != PlayerRole.GOALKEEPER]
+        if teammates:
+            return min(teammates, key=lambda t: (t.position - player.position).length())
+        return None
+
+    def _find_through_ball_target(self, player: Player) -> Optional[Player]:
+        """Find best teammate for a through ball (ahead and making a run)."""
+        best_teammate = None
+        best_score = -float('inf')
+
+        goal_center = self.pitch.get_goal_center('right')  # Home team attacks right
+
+        for teammate in self.teams[0].get_teammates(player):
+            if teammate.role == PlayerRole.GOALKEEPER:
+                continue
+
+            # Score based on being ahead and having momentum
+            to_goal_passer = (goal_center - player.position).length()
+            to_goal_teammate = (goal_center - teammate.position).length()
+
+            # Must be closer to goal than passer
+            if to_goal_teammate >= to_goal_passer - 30:
+                continue
+
+            score = 0.0
+
+            # Bonus for being ahead
+            score += (to_goal_passer - to_goal_teammate) / 100.0
+
+            # Bonus for making a run (has velocity toward goal)
+            if teammate.velocity.length() > 30:
+                goal_dir = (goal_center - teammate.position)
+                if goal_dir.length() > 0:
+                    vel_to_goal = teammate.velocity.dot(goal_dir.normalize())
+                    if vel_to_goal > 0:
+                        score += vel_to_goal / PLAYER_MAX_SPEED
+
+            # Bonus for open space (no nearby defenders)
+            min_defender_dist = min(
+                (opp.position - teammate.position).length()
+                for opp in self.teams[1].players
+            )
+            score += min(min_defender_dist / 200.0, 0.5)
+
+            if score > best_score:
+                best_score = score
+                best_teammate = teammate
+
+        # Fallback to nearest forward teammate
+        if not best_teammate:
+            return self._find_nearest_teammate(player)
+
+        return best_teammate
+
+    def _find_lobbed_pass_target(self, player: Player) -> Optional[Player]:
+        """Find best teammate for a lobbed pass (distant, with defenders in path)."""
+        best_teammate = None
+        best_score = -float('inf')
+
+        for teammate in self.teams[0].get_teammates(player):
+            if teammate.role == PlayerRole.GOALKEEPER:
+                continue
+
+            distance = (teammate.position - player.position).length()
+
+            # Lob is most useful for medium-to-long passes
+            if distance < 100:
+                continue  # Too close for lob
+
+            score = 0.0
+
+            # Count defenders between passer and receiver
+            defenders_in_path = self._count_defenders_in_path(
+                player.position,
+                teammate.position
+            )
+
+            # Lob is valuable when there are defenders in the way
+            score += defenders_in_path * 0.3
+
+            # Prefer moderate distances (not too far)
+            if 150 < distance < 400:
+                score += 0.5
+
+            # Bonus if teammate is in space at destination
+            min_defender_dist = min(
+                (opp.position - teammate.position).length()
+                for opp in self.teams[1].players
+            )
+            score += min(min_defender_dist / 150.0, 0.4)
+
+            if score > best_score:
+                best_score = score
+                best_teammate = teammate
+
+        # Fallback
+        if not best_teammate:
+            return self._find_nearest_teammate(player)
+
+        return best_teammate
+
+    def _count_defenders_in_path(self, start: pygame.Vector2,
+                                  end: pygame.Vector2) -> int:
+        """Count how many defenders are in the passing lane."""
+        count = 0
+        direction = end - start
+        dist = direction.length()
+
+        if dist == 0:
+            return 0
+
+        for opponent in self.teams[1].players:
+            to_opp = opponent.position - start
+
+            # Project onto pass line
+            t = to_opp.dot(direction) / direction.dot(direction)
+
+            if 0.1 < t < 0.9:  # In the path
+                closest = start + direction * t
+                perp_dist = (opponent.position - closest).length()
+
+                if perp_dist < 50:  # Within interception range
+                    count += 1
+
+        return count
 
     def _update(self, dt: float) -> None:
         """Update game logic."""

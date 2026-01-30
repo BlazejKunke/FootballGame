@@ -12,7 +12,10 @@ from ..constants import (
     SHOT_POWER_MIN, SHOT_POWER_MAX, SHOT_CHARGE_RATE, SHOT_CHARGE_MAX,
     SHOT_INACCURACY, PASS_SPEED, PASS_LEAD_FACTOR,
     TACKLE_RANGE, TACKLE_SUCCESS_CHANCE, TACKLE_COOLDOWN, TACKLE_STUN_TIME,
-    POSSESSION_OFFSET
+    POSSESSION_OFFSET,
+    PassType, SHORT_PASS_SPEED, SHORT_PASS_LEAD_FACTOR,
+    THROUGH_BALL_SPEED, THROUGH_BALL_LEAD_FACTOR,
+    LOBBED_PASS_SPEED, LOBBED_PASS_LEAD_FACTOR, LOBBED_PASS_INITIAL_HEIGHT_VEL
 )
 
 if TYPE_CHECKING:
@@ -176,25 +179,78 @@ class Player:
 
         self.shot_power = 0.0
 
-    def pass_ball(self, ball: 'Ball', teammate: 'Player') -> None:
-        """Pass to teammate with slight lead."""
+    def pass_ball(self, ball: 'Ball', teammate: 'Player',
+                  pass_type: PassType = PassType.SHORT) -> None:
+        """Pass to teammate with behavior based on pass type.
+        Maintains backwards compatibility - defaults to SHORT pass."""
         if self.is_stunned or not self.has_ball:
             return
 
-        # Calculate pass target with lead
-        target = teammate.position + teammate.velocity * PASS_LEAD_FACTOR
+        if pass_type == PassType.SHORT:
+            self._execute_short_pass(ball, teammate)
+        elif pass_type == PassType.THROUGH:
+            self._execute_through_ball(ball, teammate)
+        elif pass_type == PassType.LOBBED:
+            self._execute_lobbed_pass(ball, teammate)
+
+        # Stop any charging
+        self.is_charging_shot = False
+        self.shot_power = 0.0
+
+    def _execute_short_pass(self, ball: 'Ball', teammate: 'Player') -> None:
+        """Short pass: Direct ground pass to teammate's current position.
+        Slight lead based on teammate's velocity."""
+        target = teammate.position + teammate.velocity * SHORT_PASS_LEAD_FACTOR
         direction = target - self.position
 
         if direction.length() > 0:
             direction = direction.normalize()
 
-        # Release and kick
         ball.release()
-        ball.kick(direction, PASS_SPEED)
+        ball.kick(direction, SHORT_PASS_SPEED)
+        ball.pass_type = PassType.SHORT
 
-        # Stop any charging
-        self.is_charging_shot = False
-        self.shot_power = 0.0
+    def _execute_through_ball(self, ball: 'Ball', teammate: 'Player') -> None:
+        """Through ball: Pass to open space AHEAD of teammate.
+        Significant lead factor for runners."""
+        teammate_velocity = teammate.velocity
+
+        # If teammate is stationary, predict movement toward attacking goal
+        if teammate_velocity.length() < 10:
+            goal_direction = self._get_attacking_direction()
+            teammate_velocity = goal_direction * PLAYER_MAX_SPEED * 0.5
+
+        # Apply significant lead
+        target = teammate.position + teammate_velocity * THROUGH_BALL_LEAD_FACTOR
+        direction = target - self.position
+
+        if direction.length() > 0:
+            direction = direction.normalize()
+
+        ball.release()
+        ball.kick(direction, THROUGH_BALL_SPEED)
+        ball.pass_type = PassType.THROUGH
+
+    def _execute_lobbed_pass(self, ball: 'Ball', teammate: 'Player') -> None:
+        """Lobbed pass: Aerial pass that goes over defenders.
+        Ball travels in an arc and cannot be intercepted while high."""
+        target = teammate.position + teammate.velocity * LOBBED_PASS_LEAD_FACTOR
+        direction = target - self.position
+        distance = direction.length()
+
+        if direction.length() > 0:
+            direction = direction.normalize()
+
+        # Adjust initial height velocity based on distance
+        # Longer passes need higher arc
+        height_vel = LOBBED_PASS_INITIAL_HEIGHT_VEL * min(distance / 300.0, 1.5)
+
+        ball.release()
+        ball.kick_lobbed(direction, LOBBED_PASS_SPEED, height_vel)
+
+    def _get_attacking_direction(self) -> pygame.Vector2:
+        """Return unit vector toward attacking goal."""
+        return pygame.Vector2(self.team.attacking_direction, 0)
 
     def attempt_tackle(self, opponent: 'Player', ball: 'Ball') -> bool:
         """
